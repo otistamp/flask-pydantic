@@ -17,6 +17,7 @@ A clean-break major version of flask-pydantic that replaces the `@validate` deco
 - Backwards compatibility with flask-pydantic v1 `@validate` decorator
 - Bundling Swagger UI / ReDoc JS assets in the package
 - Supporting Pydantic v1 models
+- `Header` / `Cookie` parameter markers (may be added in a future minor release)
 
 ## Architecture
 
@@ -35,9 +36,9 @@ api.init_app(app)
 ```
 
 The extension:
-1. Registers `before_request` / `after_request` hooks for validation and serialization
-2. Scans registered routes for type hints after app setup
-3. Registers documentation endpoints (`/openapi.json`, `/openapi.yaml`, `/docs`, `/redoc`)
+1. During `init_app`, wraps each view function with a validation/serialization layer by iterating `app.url_map` and replacing view functions in `app.view_functions`. For the factory pattern, this wrapping is deferred using `app.before_request` on the first request to ensure all routes (including blueprint routes) are registered before scanning.
+2. Registers documentation endpoints (`/openapi.json`, `/openapi.yaml`, `/docs`, `/redoc`)
+3. Builds the OpenAPI spec lazily on first request to a docs endpoint, then caches it
 
 ### Request Parameter Markers
 
@@ -57,10 +58,12 @@ def update_user(
 ```
 
 **Markers:**
-- `Body` — JSON request body. Type must be a Pydantic `BaseModel`.
+- `Body` — JSON request body. Type must be a Pydantic `BaseModel`. Mutually exclusive with `Form` on the same route.
 - `Query` — Query string parameters. Type must be a Pydantic `BaseModel`.
-- `Form` — Form-encoded body. Type must be a Pydantic `BaseModel`.
+- `Form` — Form-encoded body. Type must be a Pydantic `BaseModel`. Mutually exclusive with `Body` on the same route.
 - Path parameters — no marker needed; inferred by matching parameter name to `<param>` segments in the route rule. Type can be any type supported by Pydantic's `TypeAdapter`.
+
+A route with both `Body` and `Form` markers raises a configuration error at startup.
 
 ### Response Modeling
 
@@ -83,6 +86,15 @@ def create_user(body: Annotated[CreateUser, Body]) -> Annotated[UserResponse, St
 ```
 
 The extension serializes the returned Pydantic model to JSON automatically.
+
+**Return type handling:**
+- `BaseModel` — serialized to JSON with the annotated status code
+- `list[BaseModel]` — serialized as a JSON array
+- `Annotated[None, Status(204)]` — returns empty body with the given status code
+- `dict` — passed through to Flask's `jsonify` (no schema in OpenAPI spec)
+- `Response` — passed through unchanged (no schema in OpenAPI spec)
+- `tuple(model, status)` or `tuple(model, status, headers)` — model is serialized, status/headers applied
+- No return annotation — treated as opaque, no OpenAPI response schema generated
 
 ### Error Responses
 
@@ -118,7 +130,9 @@ class UserView(MethodView):
 
 #### Auto-documented errors
 
-The extension automatically adds 400/422 validation error responses to the OpenAPI spec for any route that has validated parameters, even without explicit `errors` declarations.
+The extension automatically adds a validation error response to the OpenAPI spec for any route that has validated parameters, even without explicit `errors` declarations. The status code defaults to 422 and is configurable via `FLASK_PYDANTIC_VALIDATION_ERROR_STATUS_CODE`.
+
+**Merging behavior:** Method-level `@docs(errors=...)` on a `MethodView` merges with (and overrides on conflict) the class-level `errors` dict.
 
 ### OpenAPI Metadata Sources
 
@@ -133,7 +147,7 @@ Metadata is derived from existing Python/Pydantic/Flask constructs wherever poss
 | Operation description | Function/method docstring |
 | Tag | Blueprint name (auto) or `@docs(tag=...)` |
 | Summary | First line of docstring (auto) or `@docs(summary=...)` |
-| Operation ID | Auto-generated from function name or `@docs(operation_id=...)` |
+| Operation ID | Auto-generated as `blueprint_name.function_name` (or `ClassName.method_name` for MethodView) or `@docs(operation_id=...)` |
 
 #### `@docs()` decorator (optional overrides)
 
@@ -164,9 +178,12 @@ Registered automatically by the extension:
 Configurable via app config:
 
 ```python
-app.config["FLASK_PYDANTIC_OPENAPI_URL"] = "/openapi.json"  # or None to disable
-app.config["FLASK_PYDANTIC_DOCS_URL"] = "/docs"             # or None to disable
-app.config["FLASK_PYDANTIC_REDOC_URL"] = "/redoc"           # or None to disable
+app.config["FLASK_PYDANTIC_OPENAPI_URL"] = "/openapi.json"       # or None to disable
+app.config["FLASK_PYDANTIC_OPENAPI_YAML_URL"] = "/openapi.yaml" # or None to disable
+app.config["FLASK_PYDANTIC_DOCS_URL"] = "/docs"                 # or None to disable
+app.config["FLASK_PYDANTIC_REDOC_URL"] = "/redoc"               # or None to disable
+app.config["FLASK_PYDANTIC_CDN_URL"] = "https://unpkg.com"      # override for corporate environments
+app.config["FLASK_PYDANTIC_VALIDATION_ERROR_STATUS_CODE"] = 422 # validation error status code
 ```
 
 Swagger UI and ReDoc JS/CSS are loaded from unpkg or cdnjs CDN. No assets are bundled.
@@ -188,8 +205,8 @@ def get_user(user_id: int) -> UserResponse:
 When validation is off, type hints still drive OpenAPI spec generation but no runtime parsing/validation occurs.
 
 When validation is on:
-- Invalid requests return a JSON error response (status 400 or configurable)
-- The error format matches the existing flask-pydantic format: `{"validation_error": {"body_params": [...], "query_params": [...]}}`
+- Invalid requests return a JSON error response (status 422 by default, configurable via `FLASK_PYDANTIC_VALIDATION_ERROR_STATUS_CODE`)
+- The error format: `{"validation_error": {"body_params": [...], "query_params": [...]}}`
 
 ### Module Structure
 
@@ -211,7 +228,7 @@ flask_pydantic/
 
 - Flask (existing)
 - pydantic >= 2.0 (existing, drop v1 support)
-- PyYAML (new, for YAML spec output)
+- PyYAML (optional extra: `pip install flask-pydantic[yaml]`; YAML endpoint disabled when absent)
 
 No new heavy dependencies. Swagger UI and ReDoc are CDN-loaded.
 
