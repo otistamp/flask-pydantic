@@ -1,128 +1,91 @@
-from dataclasses import dataclass
-from typing import Optional
+from typing import Annotated, Optional
 
-from flask import Flask, jsonify, request
-from flask_pydantic import validate
-from pydantic import BaseModel
+from flask import Flask
+from flask.views import MethodView
+from pydantic import BaseModel, Field
+
+from flask_pydantic import FlaskPydantic, Body, Form, Query, Status, docs
 
 app = Flask("flask_pydantic_app")
-
-
-@dataclass
-class Config:
-    FLASK_PYDANTIC_VALIDATION_ERROR_STATUS_CODE: int = 422
-
-
-app.config.from_object(Config)
+app.config["FLASK_PYDANTIC_VALIDATION_ERROR_STATUS_CODE"] = 422
 
 
 class QueryModel(BaseModel):
-    age: int
-
-
-class IndexParam(BaseModel):
-    index: int
+    """Query parameters for filtering."""
+    age: int = Field(description="Age filter")
 
 
 class BodyModel(BaseModel):
-    name: str
-    nickname: Optional[str] = None
+    """Request body for creating resources."""
+    name: str = Field(description="Name of the resource")
+    nickname: Optional[str] = Field(None, description="Optional nickname")
 
 
 class FormModel(BaseModel):
-    name: str
-    nickname: Optional[str] = None
+    """Form data for submissions."""
+    name: str = Field(description="Name")
+    nickname: Optional[str] = Field(None, description="Optional nickname")
 
 
 class ResponseModel(BaseModel):
+    """Standard response."""
     id: int
     age: int
     name: str
     nickname: Optional[str] = None
 
 
-@app.route("/", methods=["POST"])
-@validate(body=BodyModel, query=QueryModel)
-def post():
-    """
-    Basic example with both query and body parameters, response object serialization.
-    """
-    # save model to DB
-    id_ = 2
+class NotFoundError(BaseModel):
+    """Resource not found."""
+    detail: str
 
-    return ResponseModel(
-        id=id_,
-        age=request.query_params.age,
-        name=request.body_params.name,
-        nickname=request.body_params.nickname,
-    )
+
+@app.route("/", methods=["POST"])
+@docs(tag="Resources", summary="Create a resource")
+def post(
+    body: Annotated[BodyModel, Body],
+    query: Annotated[QueryModel, Query],
+) -> ResponseModel:
+    """Basic example with both query and body parameters."""
+    return ResponseModel(id=2, age=query.age, name=body.name, nickname=body.nickname)
 
 
 @app.route("/form", methods=["POST"])
-@validate(form=FormModel, query=QueryModel)
-def form_post():
-    """
-    Basic example with both query and form-data parameters, response object serialization.
-    """
-    # save model to DB
-    id_ = 2
-
-    return ResponseModel(
-        id=id_,
-        age=request.query_params.age,
-        name=request.form_params.name,
-        nickname=request.form_params.nickname,
-    )
-
-
-@app.route("/kwargs", methods=["POST"])
-@validate()
-def post_kwargs(body: BodyModel, query: QueryModel):
-    """
-    Basic example with both query and body parameters, response object serialization.
-    This time using the decorated function kwargs `body` and `query` type hinting
-    """
-    # save model to DB
-    id_ = 3
-
-    return ResponseModel(id=id_, age=query.age, name=body.name, nickname=body.nickname)
-
-
-@app.route("/form/kwargs", methods=["POST"])
-@validate()
-def form_post_kwargs(form: FormModel, query: QueryModel):
-    """
-    Basic example with both query and form-data parameters, response object serialization.
-    This time using the decorated function kwargs `form` and `query` type hinting
-    """
-    # save model to DB
-    id_ = 3
-
-    return ResponseModel(id=id_, age=query.age, name=form.name, nickname=form.nickname)
+@docs(tag="Resources", summary="Submit a form")
+def form_post(
+    form: Annotated[FormModel, Form],
+    query: Annotated[QueryModel, Query],
+) -> ResponseModel:
+    """Example with form data and query parameters."""
+    return ResponseModel(id=2, age=query.age, name=form.name, nickname=form.nickname)
 
 
 @app.route("/many", methods=["GET"])
-@validate(response_many=True)
-def get_many():
-    """
-    This route returns response containing many serialized objects.
-    """
+@docs(tag="Resources", summary="Get many resources")
+def get_many() -> list[ResponseModel]:
+    """Returns multiple serialized objects."""
     return [
         ResponseModel(id=1, age=95, name="Geralt", nickname="White Wolf"),
         ResponseModel(id=2, age=45, name="Triss Merigold", nickname="sorceress"),
-        ResponseModel(id=3, age=42, name="Julian Alfred Pankratz", nickname="Jaskier"),
-        ResponseModel(id=4, age=101, name="Yennefer", nickname="Yenn"),
     ]
 
 
-@app.route("/select", methods=["POST"])
-@validate(request_body_many=True, query=IndexParam, body=BodyModel)
-def select_from_array():
-    """
-    This route takes array of objects in request body and returns the object on index
-    (index is a url query parameter)
-    """
-    try:
-        return BodyModel(**request.body_params[request.query_params.index].dict())
-    except IndexError:
-        return jsonify({"reason": "index out of bound"}), 400
+class ResourceDetailView(MethodView):
+    """Detail view for a single resource."""
+    errors = {404: NotFoundError}
+
+    def get(self, resource_id: int) -> ResponseModel:
+        """Get a resource by ID."""
+        return ResponseModel(id=resource_id, age=30, name="Example", nickname=None)
+
+    def delete(self, resource_id: int) -> Annotated[None, Status(204)]:
+        """Delete a resource."""
+        return None
+
+
+app.add_url_rule(
+    "/resources/<int:resource_id>",
+    view_func=ResourceDetailView.as_view("resource_detail"),
+)
+
+api = FlaskPydantic(app)
