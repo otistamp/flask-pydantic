@@ -449,3 +449,95 @@ class TestWrappedChainTraversal:
         spec = generate_openapi_spec(app)
         assert "/test" in spec["paths"]
         assert spec["paths"]["/test"]["get"]["summary"] == "A wrapped route."
+
+
+# ---------------------------------------------------------------------------
+# Task 9: Full integration test
+# ---------------------------------------------------------------------------
+
+
+class TestFullIntegration:
+    """Test a realistic app with multiple routes producing a complete spec."""
+
+    @pytest.fixture
+    def app(self):
+        app = Flask("my_api")
+        app.config["TESTING"] = True
+        bp = Blueprint("users", __name__)
+
+        @bp.route("/", methods=["GET"])
+        @api()
+        def list_users(query: UserQuery) -> List[UserResponse]:
+            """List all users.
+
+            Returns a paginated list of users.
+            """
+            pass
+
+        @bp.route("/", methods=["POST"])
+        @api(on_success_status=201, response=UserResponse, errors={409: ErrorResponse})
+        def create_user(body: CreateUser) -> UserResponse:
+            """Create a new user."""
+            pass
+
+        @bp.route("/<int:user_id>", methods=["GET"])
+        @api(response=UserResponse, errors={404: ErrorResponse})
+        def get_user(user_id: int):
+            """Get a user by ID."""
+            pass
+
+        app.register_blueprint(bp, url_prefix="/users")
+
+        @app.route("/health")
+        @api(validate=False)
+        def health():
+            return {"status": "ok"}
+
+        return app
+
+    def test_full_spec_structure(self, app):
+        spec = generate_openapi_spec(
+            app, title="User API", version="1.0.0", description="User management API"
+        )
+
+        # Top level
+        assert spec["openapi"] == "3.1.0"
+        assert spec["info"]["title"] == "User API"
+
+        # Paths exist
+        assert "/users/" in spec["paths"]
+        assert "/users/{user_id}" in spec["paths"]
+        assert "/health" in spec["paths"]
+
+        # GET /users/ has query params
+        get_users = spec["paths"]["/users/"]["get"]
+        assert get_users["tags"] == ["users"]
+        assert get_users["summary"] == "List all users."
+        query_params = [
+            p for p in get_users.get("parameters", []) if p["in"] == "query"
+        ]
+        assert len(query_params) == 2
+
+        # POST /users/ has request body and 201 + 409 responses
+        post_users = spec["paths"]["/users/"]["post"]
+        assert "requestBody" in post_users
+        assert "201" in post_users["responses"]
+        assert "409" in post_users["responses"]
+
+        # GET /users/{user_id} has path param and 404
+        get_user = spec["paths"]["/users/{user_id}"]["get"]
+        path_params = [p for p in get_user.get("parameters", []) if p["in"] == "path"]
+        assert len(path_params) == 1
+        assert path_params[0]["schema"]["type"] == "integer"
+        assert "404" in get_user["responses"]
+
+        # /health has no 400 (validate=False)
+        health = spec["paths"]["/health"]["get"]
+        assert "400" not in health["responses"]
+
+    def test_spec_is_json_serializable(self, app):
+        import json
+
+        spec = generate_openapi_spec(app)
+        # Should not raise
+        json.dumps(spec)
