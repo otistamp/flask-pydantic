@@ -1,34 +1,9 @@
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 
 class FlaskPydanticError(Exception):
     """Base exception for flask-pydantic."""
     pass
-
-
-# Legacy alias for backward compatibility
-BaseFlaskPydanticException = FlaskPydanticError
-
-
-class InvalidIterableOfModelsException(FlaskPydanticError):
-    """Raised when serialization of response with response_many=True fails."""
-    pass
-
-
-class JsonBodyParsingError(FlaskPydanticError):
-    """Exception for errors occurring during parsing of request body."""
-    pass
-
-
-class ManyModelValidationError(FlaskPydanticError):
-    """Raised when validation of many models in an iterable fails."""
-
-    def __init__(self, errors: List[dict], *args):
-        self._errors = errors
-        super().__init__(*args)
-
-    def errors(self):
-        return self._errors
 
 
 class ValidationError(FlaskPydanticError):
