@@ -1,28 +1,27 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
-class BaseFlaskPydanticException(Exception):
-    """Base exc class for all exception from this library"""
-
+class FlaskPydanticError(Exception):
+    """Base exception for flask-pydantic."""
     pass
 
 
-class InvalidIterableOfModelsException(BaseFlaskPydanticException):
-    """This exception is raised if there is a failure during serialization of
-    response object with `response_many=True`"""
+# Legacy alias for backward compatibility
+BaseFlaskPydanticException = FlaskPydanticError
 
+
+class InvalidIterableOfModelsException(FlaskPydanticError):
+    """Raised when serialization of response with response_many=True fails."""
     pass
 
 
-class JsonBodyParsingError(BaseFlaskPydanticException):
-    """Exception for error occurring during parsing of request body"""
-
+class JsonBodyParsingError(FlaskPydanticError):
+    """Exception for errors occurring during parsing of request body."""
     pass
 
 
-class ManyModelValidationError(BaseFlaskPydanticException):
-    """This exception is raised if there is a failure during validation of many
-    models in an iterable"""
+class ManyModelValidationError(FlaskPydanticError):
+    """Raised when validation of many models in an iterable fails."""
 
     def __init__(self, errors: List[dict], *args):
         self._errors = errors
@@ -32,9 +31,8 @@ class ManyModelValidationError(BaseFlaskPydanticException):
         return self._errors
 
 
-class ValidationError(BaseFlaskPydanticException):
-    """This exception is raised if there is a failure during validation if the
-    user has configured an exception to be raised instead of a response"""
+class ValidationError(FlaskPydanticError):
+    """Raised when request validation fails (if configured to raise)."""
 
     def __init__(
         self,
