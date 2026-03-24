@@ -137,8 +137,12 @@ class FlaskPydantic:
             self.init_app(app)
 
     def init_app(self, app: Flask):
+        from .docs_views import create_docs_blueprint
+
         app.extensions["flask_pydantic"] = self
         self._wrap_routes(app)
+        docs_bp = create_docs_blueprint(app)
+        app.register_blueprint(docs_bp)
 
         # Deferred wrapping for factory pattern
         @app.before_request
