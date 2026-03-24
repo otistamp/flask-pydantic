@@ -1,13 +1,22 @@
 """Backwards-compatible @validate decorator for v1 migration."""
+import inspect
 from functools import wraps
 from typing import Any, Callable, List, Optional, Type
 
 from flask import Response, current_app, jsonify, make_response, request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, RootModel, TypeAdapter, ValidationError
 
 from .converters import convert_query_params
 from .inspection import RouteParams
 from .validation import _sanitize_ctx_errors
+
+
+def _is_root_model(model: type) -> bool:
+    """Check if model is a RootModel subclass."""
+    try:
+        return issubclass(model, RootModel)
+    except TypeError:
+        return False
 
 
 def _model_dump_json(model: BaseModel, **kwargs):
@@ -54,6 +63,19 @@ def validate(
     """
 
     def decorate(func: Callable) -> Callable:
+        # Pre-compute path param annotations (params that are not body/query/form
+        # and have simple type annotations like int, float, str, etc.)
+        _known_param_names = {"body", "query", "form"}
+        _func_annotations = func.__annotations__.copy()
+        _func_annotations.pop("return", None)
+        _path_param_hints = {
+            name: hint
+            for name, hint in _func_annotations.items()
+            if name not in _known_param_names
+            and isinstance(hint, type)
+            and not (isinstance(hint, type) and issubclass(hint, BaseModel))
+        }
+
         @wraps(func)
         def wrapper(*args, **kwargs):
             q, b, f, err = None, None, None, {}
@@ -65,6 +87,19 @@ def validate(
             body_model = body or body_in_kwargs
             form_in_kwargs = func.__annotations__.get("form")
             form_model = form or form_in_kwargs
+
+            # Validate path params
+            for name, type_ in _path_param_hints.items():
+                if name in kwargs:
+                    try:
+                        adapter = TypeAdapter(type_)
+                        kwargs[name] = adapter.validate_python(kwargs[name])
+                    except ValidationError as ve:
+                        path_err = ve.errors()[0]
+                        path_err["loc"] = [name]
+                        err.setdefault("path_params", []).append(
+                            _sanitize_ctx_errors([path_err])[0]
+                        )
 
             # Validate query
             if query_model:
@@ -95,7 +130,10 @@ def validate(
                             ]
                 else:
                     try:
-                        b = body_model(**body_params)
+                        if isinstance(body_params, list) and _is_root_model(body_model):
+                            b = body_model.model_validate(body_params)
+                        else:
+                            b = body_model(**body_params)
                     except TypeError:
                         content_type = request.headers.get("Content-Type", "").lower()
                         media_type = content_type.split(";")[0]
