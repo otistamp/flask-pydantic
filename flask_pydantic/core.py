@@ -8,6 +8,7 @@ from pydantic.v1.error_wrappers import ValidationError as V1ValidationError
 from pydantic.v1.tools import parse_obj_as
 
 from .converters import convert_query_params
+from .openapi import _ensure_openapi_hook
 from .exceptions import (
     InvalidIterableOfModelsException,
     JsonBodyParsingError,
@@ -131,7 +132,25 @@ def get_body_dict(**params):
     return data
 
 
-def validate(
+def _resolve_response_model(hint):
+    """Extract a pydantic v2 BaseModel from a type hint, or return None."""
+    if hint is None:
+        return None
+    if isinstance(hint, type) and issubclass(hint, BaseModel):
+        return hint
+    origin = getattr(hint, "__origin__", None)
+    args = getattr(hint, "__args__", ())
+    if origin is list or origin is List:
+        if args and isinstance(args[0], type) and issubclass(args[0], BaseModel):
+            return args[0]
+    if origin is Union:
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) == 1 and isinstance(non_none[0], type) and issubclass(non_none[0], BaseModel):
+            return non_none[0]
+    return None
+
+
+def api(
     body: Optional[Type[V1OrV2BaseModel]] = None,
     query: Optional[Type[V1OrV2BaseModel]] = None,
     on_success_status: int = 200,
@@ -141,6 +160,9 @@ def validate(
     response_by_alias: bool = False,
     get_json_params: Optional[dict] = None,
     form: Optional[Type[V1OrV2BaseModel]] = None,
+    validate: Optional[bool] = None,
+    response: Optional[Type[V1OrV2BaseModel]] = None,
+    errors: Optional[dict] = None,
 ):
     """
     Decorator for route methods which will validate query, body and form parameters
@@ -162,11 +184,16 @@ def validate(
         (request.body_params then contains list of models i. e. List[BaseModel])
     `response_by_alias` whether Pydantic's alias is used
     `get_json_params` - parameters to be passed to Request.get_json() function
+    `validate` - whether to perform request validation (default True, or read from
+        app.config["FLASK_PYDANTIC_VALIDATE"]). When False, request validation is
+        skipped but response serialization of BaseModel instances still applies.
+    `response` - explicit response model (also inferred from return type hint)
+    `errors` - optional error schema metadata
 
     example::
 
         from flask import request
-        from flask_pydantic import validate
+        from flask_pydantic import api
         from pydantic import BaseModel
 
         class Query(BaseModel):
@@ -186,7 +213,7 @@ def validate(
         ...
 
         @app.route("/")
-        @validate(query=Query, body=Body, form=Form)
+        @api(query=Query, body=Body, form=Form)
         def test_route():
             query = request.query_params.query
             color = request.body_params.query
@@ -194,7 +221,7 @@ def validate(
             return MyModel(...)
 
         @app.route("/kwargs")
-        @validate()
+        @api()
         def test_route_kwargs(query:Query, body:Body, form:Form):
 
             return MyModel(...)
@@ -205,6 +232,72 @@ def validate(
     def decorate(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
+            if not getattr(current_app, "_flask_pydantic_openapi_hook_registered", False):
+                _ensure_openapi_hook(current_app._get_current_object())
+            should_validate = validate
+            if should_validate is None:
+                should_validate = current_app.config.get("FLASK_PYDANTIC_VALIDATE", True)
+
+            if not should_validate:
+                # Validation is bypassed, but response serialization of BaseModel
+                # instances still runs below so callers get consistent JSON output.
+                # Inject None for any model-annotated kwargs so the function
+                # signature is satisfied even without validation.
+                query_in_kwargs = func.__annotations__.get("query")
+                body_in_kwargs = func.__annotations__.get("body")
+                form_in_kwargs = func.__annotations__.get("form")
+                if query_in_kwargs:
+                    kwargs.setdefault("query", None)
+                if body_in_kwargs:
+                    kwargs.setdefault("body", None)
+                if form_in_kwargs:
+                    kwargs.setdefault("form", None)
+                res = current_app.ensure_sync(func)(*args, **kwargs)
+                # Still handle response serialization for pydantic models
+                if response_many:
+                    if is_iterable_of_models(res):
+                        return make_json_response(
+                            res,
+                            on_success_status,
+                            by_alias=response_by_alias,
+                            exclude_none=exclude_none,
+                            many=True,
+                        )
+                    else:
+                        raise InvalidIterableOfModelsException(res)
+                if isinstance(res, (BaseModel, V1BaseModel)):
+                    return make_json_response(
+                        res,
+                        on_success_status,
+                        exclude_none=exclude_none,
+                        by_alias=response_by_alias,
+                    )
+                if (
+                    isinstance(res, tuple)
+                    and len(res) in [2, 3]
+                    and isinstance(res[0], (BaseModel, V1BaseModel))
+                ):
+                    headers = None
+                    status = on_success_status
+                    if isinstance(res[1], (dict, tuple, list)):
+                        headers = res[1]
+                    elif len(res) == 3 and isinstance(res[2], (dict, tuple, list)):
+                        status = res[1]
+                        headers = res[2]
+                    else:
+                        status = res[1]
+                    ret = make_json_response(
+                        res[0],
+                        status,
+                        exclude_none=exclude_none,
+                        by_alias=response_by_alias,
+                    )
+                    if headers:
+                        ret.headers.update(headers)
+                    return ret
+                return res
+
+            # Full validation logic
             q, b, f, err = None, None, None, {}
             kwargs, path_err = validate_path_params(func, kwargs)
             if path_err:
@@ -351,6 +444,58 @@ def validate(
 
             return res
 
+        # Resolve response model: explicit param > return type hint
+        resolved_response = response
+        if resolved_response is None:
+            return_hint = func.__annotations__.get("return")
+            resolved_response = _resolve_response_model(return_hint)
+
+        # For metadata: store resolved validate flag
+        meta_validate = validate if validate is not None else True
+        wrapper._api_metadata = {
+            "query_model": func.__annotations__.get("query") or query,
+            "body_model": func.__annotations__.get("body") or body,
+            "form_model": func.__annotations__.get("form") or form,
+            "response_model": resolved_response,
+            "errors": errors,
+            "on_success_status": on_success_status,
+            "validate": meta_validate,
+            "response_many": response_many,
+            "request_body_many": request_body_many,
+            "exclude_none": exclude_none,
+            "response_by_alias": response_by_alias,
+        }
+
         return wrapper
 
     return decorate
+
+
+def validate(
+    body: Optional[Type[V1OrV2BaseModel]] = None,
+    query: Optional[Type[V1OrV2BaseModel]] = None,
+    on_success_status: int = 200,
+    exclude_none: bool = False,
+    response_many: bool = False,
+    request_body_many: bool = False,
+    response_by_alias: bool = False,
+    get_json_params: Optional[dict] = None,
+    form: Optional[Type[V1OrV2BaseModel]] = None,
+    response: Optional[Type[V1OrV2BaseModel]] = None,
+    errors: Optional[dict] = None,
+):
+    """Backward-compatible alias for :func:`api`. Always enables validation."""
+    return api(
+        body=body,
+        query=query,
+        on_success_status=on_success_status,
+        exclude_none=exclude_none,
+        response_many=response_many,
+        request_body_many=request_body_many,
+        response_by_alias=response_by_alias,
+        get_json_params=get_json_params,
+        form=form,
+        validate=True,
+        response=response,
+        errors=errors,
+    )
