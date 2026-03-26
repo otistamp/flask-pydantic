@@ -298,6 +298,8 @@ def _serve_openapi_spec():
         return None
     if flask_request.path != url:
         return None
+    if flask_request.method not in ("GET", "HEAD"):
+        return None
 
     title = current_app.config.get("FLASK_PYDANTIC_OPENAPI_TITLE")
     version = current_app.config.get("FLASK_PYDANTIC_OPENAPI_VERSION", "1.0.0")

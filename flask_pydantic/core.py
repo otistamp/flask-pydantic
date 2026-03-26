@@ -232,7 +232,8 @@ def api(
     def decorate(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
-            _ensure_openapi_hook(current_app._get_current_object())
+            if not getattr(current_app, "_flask_pydantic_openapi_hook_registered", False):
+                _ensure_openapi_hook(current_app._get_current_object())
             should_validate = validate
             if should_validate is None:
                 should_validate = current_app.config.get("FLASK_PYDANTIC_VALIDATE", True)
