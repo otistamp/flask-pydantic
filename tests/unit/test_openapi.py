@@ -541,3 +541,31 @@ class TestFullIntegration:
         spec = generate_openapi_spec(app)
         # Should not raise
         json.dumps(spec)
+
+
+class TestOpenAPIEndpoint:
+    """Test the config-driven OpenAPI endpoint."""
+
+    @pytest.fixture
+    def app(self):
+        app = Flask("test_app")
+        app.config["TESTING"] = True
+
+        @app.route("/health")
+        @api(validate=False)
+        def health():
+            return {"status": "ok"}
+
+        return app
+
+    def test_default_endpoint_returns_spec(self, app):
+        """Endpoint is served at /openapi.json by default."""
+        with app.test_client() as client:
+            # Hit a decorated route first to trigger hook registration
+            client.get("/health")
+            resp = client.get("/openapi.json")
+            assert resp.status_code == 200
+            assert resp.content_type == "application/json"
+            data = resp.get_json()
+            assert data["openapi"] == "3.1.0"
+            assert "/health" in data["paths"]

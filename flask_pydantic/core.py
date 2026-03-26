@@ -8,6 +8,7 @@ from pydantic.v1.error_wrappers import ValidationError as V1ValidationError
 from pydantic.v1.tools import parse_obj_as
 
 from .converters import convert_query_params
+from .openapi import _ensure_openapi_hook
 from .exceptions import (
     InvalidIterableOfModelsException,
     JsonBodyParsingError,
@@ -231,6 +232,7 @@ def api(
     def decorate(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
+            _ensure_openapi_hook(current_app._get_current_object())
             should_validate = validate
             if should_validate is None:
                 should_validate = current_app.config.get("FLASK_PYDANTIC_VALIDATE", True)

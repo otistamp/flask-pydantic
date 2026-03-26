@@ -1,7 +1,7 @@
 import re
 from typing import Any, Optional, Type
 
-from flask import Flask
+from flask import Flask, jsonify, request as flask_request
 from pydantic import BaseModel
 
 # Flask URL converter → OpenAPI type mapping
@@ -287,3 +287,31 @@ def generate_openapi_spec(
             spec["paths"][openapi_path][method.lower()] = operation
 
     return spec
+
+
+def _serve_openapi_spec():
+    """before_request handler that serves the OpenAPI spec if the path matches."""
+    from flask import current_app
+
+    url = current_app.config.get("FLASK_PYDANTIC_OPENAPI_URL", "/openapi.json")
+    if url is None:
+        return None
+    if flask_request.path != url:
+        return None
+
+    title = current_app.config.get("FLASK_PYDANTIC_OPENAPI_TITLE")
+    version = current_app.config.get("FLASK_PYDANTIC_OPENAPI_VERSION", "1.0.0")
+    spec = generate_openapi_spec(current_app, title=title, version=version)
+    return jsonify(spec)
+
+
+def _ensure_openapi_hook(app: Flask):
+    """Register the OpenAPI before_request handler once per app.
+
+    Uses direct dict access instead of app.before_request() to avoid Flask's
+    setup-finished guard, which blocks registration after the first request.
+    """
+    if getattr(app, "_flask_pydantic_openapi_hook_registered", False):
+        return
+    app._flask_pydantic_openapi_hook_registered = True
+    app.before_request_funcs.setdefault(None, []).append(_serve_openapi_spec)
