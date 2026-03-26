@@ -569,3 +569,47 @@ class TestOpenAPIEndpoint:
             data = resp.get_json()
             assert data["openapi"] == "3.1.0"
             assert "/health" in data["paths"]
+
+    def test_none_disables_endpoint(self, app):
+        """Setting FLASK_PYDANTIC_OPENAPI_URL to None disables the endpoint."""
+        app.config["FLASK_PYDANTIC_OPENAPI_URL"] = None
+        with app.test_client() as client:
+            client.get("/health")
+            resp = client.get("/openapi.json")
+            assert resp.status_code == 404
+
+    def test_custom_url(self, app):
+        """Custom URL path is respected."""
+        app.config["FLASK_PYDANTIC_OPENAPI_URL"] = "/api/schema"
+        with app.test_client() as client:
+            client.get("/health")
+            resp = client.get("/api/schema")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["openapi"] == "3.1.0"
+
+            # Default path should 404
+            resp_default = client.get("/openapi.json")
+            assert resp_default.status_code == 404
+
+    def test_config_title_and_version(self, app):
+        """FLASK_PYDANTIC_OPENAPI_TITLE and _VERSION override spec info."""
+        app.config["FLASK_PYDANTIC_OPENAPI_TITLE"] = "My API"
+        app.config["FLASK_PYDANTIC_OPENAPI_VERSION"] = "2.0.0"
+        with app.test_client() as client:
+            client.get("/health")
+            resp = client.get("/openapi.json")
+            data = resp.get_json()
+            assert data["info"]["title"] == "My API"
+            assert data["info"]["version"] == "2.0.0"
+
+    def test_hook_registers_once(self, app):
+        """_ensure_openapi_hook only registers the before_request handler once."""
+        from flask_pydantic.openapi import _ensure_openapi_hook
+
+        before_count = len(app.before_request_funcs.get(None, []))
+        _ensure_openapi_hook(app)
+        _ensure_openapi_hook(app)
+        _ensure_openapi_hook(app)
+        after_count = len(app.before_request_funcs.get(None, []))
+        assert after_count - before_count == 1
